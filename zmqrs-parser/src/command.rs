@@ -9,7 +9,7 @@ use slog::{Error, Record, Serializer};
 
 use crate::{ByteSlice, FrameHeader};
 
-impl<'a> slog::Value for ByteSlice<'a> {
+impl<'a> slog::Value for ByteSlice<&'a [u8]> {
     fn serialize(
         &self,
         _record: &Record,
@@ -32,30 +32,64 @@ impl<'a> slog::Value for ByteSlice<'a> {
 }
 
 // http://zmtp.org/page:read-the-docs#toc12
-#[derive(Debug)]
-pub enum Command<'a> {
+#[derive(Debug, Clone)]
+pub enum Command<S, T> {
     // for null-security
-    READY(MetaData<'a>),
-    ERROR(ByteSlice<'a>),
-    SUBSCRIBE(ByteSlice<'a>),
-    CANCEL(ByteSlice<'a>),
-    PING(Ping<'a>),
-    PONG(Pong<'a>),
+    READY(MetaData<S, T>),
+    ERROR(ByteSlice<T>),
+    SUBSCRIBE(ByteSlice<T>),
+    CANCEL(ByteSlice<T>),
+    PING(Ping<T>),
+    PONG(Pong<T>),
 }
 
-#[derive(Debug)]
-pub struct Ping<'a> {
+impl From<(&bytes::Bytes, Command<&str, &[u8]>)> for Command<bytes::Bytes, bytes::Bytes> {
+    fn from(input: (&bytes::Bytes, Command<&str, &[u8]>)) -> Self {
+        let (buffer, cmd) = input;
+
+        match cmd {
+            Command::READY(meta_data) => Command::READY((buffer, meta_data).into()),
+            Command::ERROR(slice) => Command::ERROR((buffer, slice).into()),
+            Command::SUBSCRIBE(slice) => Command::SUBSCRIBE((buffer, slice).into()),
+            Command::CANCEL(slice) => Command::CANCEL((buffer, slice).into()),
+            Command::PING(ping) => Command::PING((buffer, ping).into()),
+            Command::PONG(pong) => Command::PONG((buffer, pong).into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Ping<T> {
     pub ttl: u16,
-    pub context: &'a [u8],
+    pub context: T,
 }
 
-#[derive(Debug)]
-pub struct Pong<'a> {
-    pub context: &'a [u8],
+#[derive(Debug, Clone)]
+pub struct Pong<T> {
+    pub context: T,
 }
 
-#[derive(Debug)]
-pub struct MetaData<'a> {
+impl From<(&bytes::Bytes, Ping<&[u8]>)> for Ping<bytes::Bytes> {
+    fn from(input: (&bytes::Bytes, Ping<&[u8]>)) -> Self {
+        let (buffer, subset) = input;
+        Ping {
+            context: buffer.slice_ref(subset.context),
+            ttl: subset.ttl,
+        }
+    }
+}
+
+impl From<(&bytes::Bytes, Pong<&[u8]>)> for Pong<bytes::Bytes> {
+    fn from(input: (&bytes::Bytes, Pong<&[u8]>)) -> Self {
+        let (buffer, subset) = input;
+        Pong {
+            context: buffer.slice_ref(subset.context),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaData<S, T> {
     /// Metadata names SHALL be case-insensitive.
     /// These metadata properties are defined:
     ///
@@ -64,14 +98,27 @@ pub struct MetaData<'a> {
     /// * "Identity", which specifies the sender's socket identity. See the section "The Identity Property" below. The sender MAY specify an Identity.
     ///
     /// * "Resource", which specifies the a resource to connect to. See the section "The Resource Property" below. The sender MAY specify a Resource.
-    properties: Map<&'a str, ByteSlice<'a>>, // TODO: das passt für plain, aber auch für andere?
+    properties: Map<S, ByteSlice<T>>, // TODO: das passt für plain, aber auch für andere?
+}
+
+impl From<(&bytes::Bytes, MetaData<&str, &[u8]>)> for MetaData<bytes::Bytes, bytes::Bytes> {
+    fn from(input: (&bytes::Bytes, MetaData<&str, &[u8]>)) -> Self {
+        let (buffer, meta_data) = input;
+        let mut properties = meta_data
+            .properties
+            .into_iter()
+            .map(|(k, v)| (buffer.slice_ref(k.as_bytes()), (buffer, v).into()))
+            .collect();
+
+        MetaData { properties }
+    }
 }
 
 fn meta_data<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], MetaData<'a>> {
+) -> IResult<&'a [u8], MetaData<&'a str, &'a [u8]>> {
     let mut properties = Map::new();
 
     let mut current_pos = input;
@@ -99,7 +146,7 @@ fn meta_data<'a>(
 fn property<'a>(
     input: &'a [u8],
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], (&'a str, ByteSlice<'a>)> {
+) -> IResult<&'a [u8], (&'a str, ByteSlice<&'a [u8]>)> {
     let is_name_char = |v: u8| match v {
         b'-' => true,
         b'_' => true,
@@ -125,7 +172,7 @@ pub fn command<'a>(
     input: &'a [u8],
     hdr: &FrameHeader,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     let (input, cmd_name_len) = be_u8(input)?;
 
     // sanity check: longest command name is SUBSCRIBE
@@ -159,7 +206,7 @@ fn command_ready_meta_data<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     let (input, md) = meta_data(input, data_len, logger)?;
 
     Ok((input, Command::READY(md)))
@@ -171,7 +218,7 @@ fn command_ready_meta_data<'a>(
 fn command_error_reason<'a>(
     input: &'a [u8],
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     let (input, len) = be_u8(input)?;
     let (input, error_txt) = take(len as usize)(input)?;
     trace!(logger, "command_error:";
@@ -199,7 +246,7 @@ fn command_subscribe_subscription<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     trace!(logger, "command subscribe:"; o!("data_len" => data_len));
     let (input, channel_name) = subscription(input, data_len, logger)?;
     Ok((input, Command::SUBSCRIBE(ByteSlice(channel_name))))
@@ -209,7 +256,7 @@ fn command_cancel_subscription<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     trace!(logger, "command cancel:"; o!("data_len" => data_len));
 
     let (input, channel_name) = subscription(input, data_len, logger)?;
@@ -224,7 +271,7 @@ fn command_ping<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     assert!(data_len > 2);
     let (input, ttl) = be_u16(input)?;
     let (input, context) = take(data_len - 2)(input)?;
@@ -237,7 +284,7 @@ fn command_pong<'a>(
     input: &'a [u8],
     data_len: usize,
     logger: &mut slog::Logger,
-) -> IResult<&'a [u8], Command<'a>> {
+) -> IResult<&'a [u8], Command<&'a str, &'a [u8]>> {
     let (input, context) = take(data_len)(input)?;
     trace!(logger, "command pong:"; o!("context" => ByteSlice(context)));
 

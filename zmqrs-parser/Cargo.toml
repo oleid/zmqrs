@@ -5,6 +5,8 @@ authors = ["Olaf Leidinger <oleid@mescharet.de>"]
 edition = "2018"
 
 [dependencies]
+futures = { version = "0.3", optional = true}
+bytes = { version = "0.5", default-features = false, optional = true }
 
 [dependencies.nom]
 version = "5.1"
@@ -18,3 +20,12 @@ default-features = false
 hex-literal = "0.2"
 slog-term = "2.4"
 slog-async = "2.3"
+
+[dependencies.futures_codec]
+version = "0.4"
+default-features = false
+optional = true
+
+[features]
+default = ["std"]
+std = ["futures", "bytes", "futures_codec"]

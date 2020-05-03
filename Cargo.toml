@@ -1,4 +1,5 @@
 [workspace]
 members = [
-    "zmqrs-parser"
+    "zmqrs-parser",
+    "zmqrs-protocol"
 ]
